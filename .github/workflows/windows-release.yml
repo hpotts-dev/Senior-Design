@@ -3,7 +3,7 @@ name: Windows x64 release
 on:
   push:
     branches: [main]
-    paths: [.github/workflows/windows-release.yml]
+    paths: [.github/workflows/windows-release.yml, tools/build_portable_windows.py]
   workflow_dispatch:
 
 permissions:
@@ -30,6 +30,7 @@ jobs:
           architecture: x64
       - name: Test and build
         run: |
+          $PSNativeCommandUseErrorActionPreference = $true
           python -m pip install --only-binary=:all: -r requirements-release.txt
           python -m unittest discover
           python tools/build_portable_windows.py

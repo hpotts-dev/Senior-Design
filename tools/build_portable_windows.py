@@ -39,7 +39,7 @@ def main():
             shutil.copy2(base / name, runtime)
         shutil.copytree(base / "DLLs", runtime / "DLLs", ignore=IGNORE)
         shutil.copytree(base / "Lib", runtime / "Lib", ignore=shutil.ignore_patterns(
-            "__pycache__", "*.pyc", "site-packages", "ensurepip", "codex-*.pem"))
+            "__pycache__", "*.pyc", "site-packages", "ensurepip", "test", "idle_test", "codex-*.pem"))
         packages = runtime / "Lib" / "site-packages"
         subprocess.run([sys.executable, "-m", "pip", "install", "--only-binary=:all:",
                         "--no-compile", "--target", str(packages), "-r", str(requirements)],
