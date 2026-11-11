@@ -1,0 +1,123 @@
+[app]
+display_fps = 60.0
+display_width = 480
+latency_target_ms = 50.0
+network_budget_MBps = 90.0
+
+[recording]
+output_dir = "captures"
+format = "npy_stream"
+stream_rollover_MB = 512
+frame_queue_size = 160
+telemetry_queue_size = 4096
+every_n_frames = 1
+start_recording = false
+generate_readable = true
+readable_image_interval_s = 60.0
+snapshot_interval_s = 60.0
+
+[pid]
+source_role = "far_field"
+host = "127.0.0.1"
+port = 49152
+enabled = true
+max_sample_age_ms = 50.0
+watchdog_ms = 200.0
+kp = [0.02, 0.02]
+ki = [0.005, 0.005]
+kd = [0.0, 0.0]
+derivative_tau_s = 0.02
+integral_limit = 0.5
+output_limit = 1.0
+slew_per_s = 10.0
+deadband_urad = 0.0
+
+[[cameras]]
+role = "far_field"
+serial = ""
+width = 1456
+height = 1088
+offset_x = 0
+offset_y = 0
+fps = 12.0
+exposure_us = 2000.0
+gain = 0.0
+pixel_format = "Mono12"
+packed_transport = true
+packet_size = 1500
+throughput_limit_bps = 36000000
+inter_packet_delay_ticks = 0
+frame_transmission_delay_ticks = 0
+grab_timeout_ms = 100
+max_buffers = 4
+analysis_roi = []
+background = 8.0
+threshold = 10.0
+min_flux = 500.0
+max_saturated_fraction = 0.01
+saturation_level = 0
+reference_px = []
+urad_per_pixel = [[17.25, 0.0], [0.0, 17.25]]
+calibration_confirmed = false
+background_file = ""
+background_frames = 16
+
+[[cameras]]
+role = "dark_field"
+serial = ""
+width = 1456
+height = 1088
+offset_x = 0
+offset_y = 0
+fps = 6.0
+exposure_us = 2000.0
+gain = 0.0
+pixel_format = "Mono12"
+packed_transport = true
+packet_size = 1500
+throughput_limit_bps = 20000000
+inter_packet_delay_ticks = 0
+frame_transmission_delay_ticks = 0
+grab_timeout_ms = 100
+max_buffers = 4
+analysis_roi = []
+background = 8.0
+threshold = 10.0
+min_flux = 500.0
+max_saturated_fraction = 0.01
+saturation_level = 0
+reference_px = []
+urad_per_pixel = [[17.25, 0.0], [0.0, 17.25]]
+calibration_confirmed = false
+background_file = ""
+background_frames = 16
+
+[[cameras]]
+role = "near_field"
+serial = ""
+width = 1456
+height = 1088
+offset_x = 0
+offset_y = 0
+fps = 12.0
+exposure_us = 2000.0
+gain = 0.0
+pixel_format = "Mono12"
+packed_transport = true
+packet_size = 1500
+throughput_limit_bps = 36000000
+inter_packet_delay_ticks = 0
+frame_transmission_delay_ticks = 0
+grab_timeout_ms = 100
+max_buffers = 4
+analysis_roi = []
+background = 8.0
+threshold = 10.0
+min_flux = 500.0
+max_saturated_fraction = 0.01
+saturation_level = 0
+reference_px = []
+urad_per_pixel = [[17.25, 0.0], [0.0, 17.25]]
+calibration_confirmed = false
+background_file = ""
+background_frames = 16

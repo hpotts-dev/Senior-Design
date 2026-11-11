@@ -1,0 +1,5 @@
+numpy==2.5.4
+opencv-python-headless==5.0.0.93
+pypylon==26.8
+PySide6-Essentials==6.10.2
+shiboken6==6.10.2

@@ -1,0 +1,51 @@
+name: Windows x64 release
+
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/windows-release.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: windows-release
+
+jobs:
+  build-and-publish:
+    if: github.ref == 'refs/heads/main'
+    runs-on: windows-2025
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          architecture: x64
+      - name: Test and build
+        run: |
+          python -m pip install --only-binary=:all: -r requirements-release.txt
+          python -m unittest discover
+          python tools/build_portable_windows.py
+      - name: Test the extracted download
+        run: |
+          Expand-Archive dist/BeamDiagnostics-Windows-x64.zip "$env:RUNNER_TEMP/Beam test"
+          $app = "$env:RUNNER_TEMP/Beam test/BeamDiagnostics"
+          $result = & "$app/run_simulation.cmd" --duration 5 --record --wait-report
+          if ($LASTEXITCODE -ne 0) { throw "The extracted app failed" }
+          $summary = ($result -join "`n") | ConvertFrom-Json
+          if ($summary.recording.frames_saved -le 0 -or $summary.recording.frames_dropped -or
+              $summary.timing.host_to_display_submission.count -le 0 -or
+              !(Test-Path "$($summary.session)/human_readable/START_HERE.html")) {
+            throw "The extracted app did not produce the expected recording and report"
+          }
+      - name: Publish the verified ZIP
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "v1.0.0"
+          gh release create $tag dist/BeamDiagnostics-Windows-x64.zip --target $env:GITHUB_SHA --title "Beam Diagnostics $tag" --notes "Windows x64 portable ZIP. Extract it and open run_simulation.cmd, or follow the README to connect your Basler cameras."

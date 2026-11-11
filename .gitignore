@@ -1,0 +1,13 @@
+.venv/
+.venv.backup_*/
+dist/
+.test_dependencies/
+__pycache__/
+*.pyc
+captures/
+backgrounds/
+validation/runs/
+
+.runtime/
+config.toml
+validation/windows_portability_*
