@@ -145,7 +145,7 @@ class CameraAssignmentUITests(unittest.TestCase):
         from beamdiag.camera_setup_gui import CameraAssignmentDialog
         with TemporaryDirectory(dir=ROOT/"validation") as tmp:
             path = Path(tmp)/"camera mapping.toml"
-            with patch.object(CameraAssignmentDialog, "refresh_cameras"):
+            with patch.object(CameraAssignmentDialog, "refresh_cameras", new=lambda self: None):
                 dialog = CameraAssignmentDialog(AppConfig(), path)
             try:
                 dialog.saved_choices = {}

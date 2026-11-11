@@ -11,11 +11,13 @@ permissions:
 
 concurrency:
   group: windows-release
+  cancel-in-progress: true
 
 jobs:
   build-and-publish:
     if: github.ref == 'refs/heads/main'
     runs-on: windows-2025
+    timeout-minutes: 15
     env:
       QT_QPA_PLATFORM: offscreen
     steps:
