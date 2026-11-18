@@ -1,6 +1,8 @@
 """Build an extract-and-run ZIP from a Windows x64 Python 3.12 environment."""
+from hashlib import file_digest
 from importlib.metadata import version
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -26,6 +28,9 @@ def main():
         name, expected = pin.split("==")
         if version(name) != expected:
             raise SystemExit(f"Install {pin} in the build environment.")
+    release = (ROOT / "VERSION").read_text(encoding="ascii").strip()
+    if not re.fullmatch(r"(?:0|[1-9][0-9]{0,8})(?:\.(?:0|[1-9][0-9]{0,8})){2}", release):
+        raise SystemExit("VERSION must contain a stable version such as 1.1.0.")
 
     destination = ROOT / "dist" / "BeamDiagnostics-Windows-x64.zip"
     destination.parent.mkdir(exist_ok=True)
@@ -47,17 +52,16 @@ def main():
         (runtime / "python312._pth").write_text(
             "Lib\nDLLs\nLib/site-packages\n..\n", encoding="ascii")
         shutil.copytree(ROOT / "beamdiag", stage / "beamdiag", ignore=IGNORE)
-        for name in ("diagnostic_app.py", "pid_controller.py", "config.example.toml",
+        for name in ("diagnostic_app.py", "pid_controller.py", "portable_launch.py", "updater.py",
+                     "VERSION", "config.example.toml",
                      "README.md", "NETWORK_SETUP.md", "LIVE_CAPTURE_GUIDE.md",
                      "USER_GUIDE.md", "THIRD_PARTY.md", "requirements-release.txt"):
             shutil.copy2(ROOT / name, stage)
         shutil.copytree(ROOT / "licenses", stage / "licenses")
         shutil.copy2(ROOT / "config.example.toml", stage / "config.toml")
         for name, args in LAUNCHERS.items():
-            if args.startswith("diagnostic_app.py"):
-                args = args.replace("diagnostic_app.py", '"%~dp0diagnostic_app.py"', 1)
             (stage / f"{name}.cmd").write_text(
-                f'@echo off\nsetlocal\n"%~dp0.runtime\\python.exe" -X utf8 {args} %*\n',
+                f'@echo off\nsetlocal\n"%~dp0.runtime\\python.exe" -X utf8 "%~dp0portable_launch.py" {args} %*\n',
                 encoding="ascii")
         subprocess.run([str(runtime / "python.exe"), "-m", "compileall", "-q", "-f",
                         "--invalidation-mode", "checked-hash", str(stage)], check=True)
@@ -66,7 +70,12 @@ def main():
             for path in sorted(stage.rglob("*")):
                 if path.is_file():
                     archive.write(path, path.relative_to(stage.parent).as_posix())
+        checksum_path = Path(work) / (destination.name + ".sha256")
+        with archive_path.open("rb") as stream:
+            digest = file_digest(stream, "sha256").hexdigest()
+        checksum_path.write_text(f"{digest}  {destination.name}\n", encoding="ascii")
         archive_path.replace(destination)
+        checksum_path.replace(destination.with_suffix(".zip.sha256"))
     print(destination)
 
 

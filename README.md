@@ -2,9 +2,23 @@
 
 The Beam Alignment dashboard shows Near Field (NF) and Far Field (FF) position, displacement and spectra. A separate Dark Field (DF) view monitors incoming light. The nominal PID reports a normalized X/Y correction from the measured angle between the NF and FF planes.
 
-## Run the dashboard
+## Download for Windows x64
 
-From this checkout, use **run_simulation.cmd** to try three simulated cameras, or **run_basler.cmd** after assigning the three real cameras. Source setup is below. The existing [Windows ZIP release](https://github.com/hpotts-dev/Senior-Design/releases/latest) predates this dashboard.
+[![Download Beam Diagnostics for Windows x64](https://img.shields.io/badge/Download-Beam%20Diagnostics%20for%20Windows%20x64-0969da?style=for-the-badge&logo=windows)](https://github.com/hpotts-dev/Senior-Design/releases/latest/download/BeamDiagnostics-Windows-x64.zip)
+
+1. Download the ZIP and use **Extract All** to unpack it into a folder you can write to, such as **Documents**.
+2. Open the extracted **BeamDiagnostics** folder and double-click **run_simulation.cmd**. The ZIP includes Python and the libraries needed to run the dashboard.
+3. To use real cameras, follow the [camera setup](#connect-real-cameras) before opening **run_basler.cmd**.
+
+[Latest release and notes](https://github.com/hpotts-dev/Senior-Design/releases/latest)
+
+### Automatic updates
+
+The portable launchers check GitHub for a newer stable release at startup. They install updates before opening the dashboard and keep your settings, background references, and captures. Any release published during a capture is picked up the next time you launch the app. If GitHub is unavailable, the installed version opens as usual.
+
+If you are using a release older than **v1.1.0**, download and extract the current ZIP once. Copy your existing **config.toml** and any **backgrounds** folder into the new **BeamDiagnostics** folder to reuse your settings. Your previous captures are in the original folder.
+
+## Use the dashboard
 
 - Click an NF or FF image to set its reference. The red X and blue Y traces show centroid minus reference over the last three seconds. Displacement uses inches when the plane scale is known and pixels otherwise. RMS is the root mean square radial displacement, PV is its peak-to-valley range, and Δ is the current radius.
 - Open **PID → Settings** for gains, limits and timing. For hardware, open **Capture → Configuration** and set each NF/FF camera’s `plane_mm_per_pixel` to its measured 2×2 transform into the same transverse coordinate system. Set `pid.plane_separation_mm` to the positive axial distance between the imaged planes. The per-axis angle in µrad is `1e6 × atan2(FF displacement − NF displacement, plane separation)`, with lengths in mm. Each input uses its own reference. The software pairs each sample once, checks the age of the older sample, and holds output at zero on invalid or expired feedback. Simulation uses 0.00345 mm/px and 200 mm unless overridden.
@@ -48,4 +62,8 @@ py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe tools\build_portable_windows.py
 ```
 
-The build writes **dist/BeamDiagnostics-Windows-x64.zip**. It packages the standard Python runtime and pinned binary libraries in an isolated folder, with fresh camera settings. [Full user guide](USER_GUIDE.md) · [Third-party software](THIRD_PARTY.md)
+The build writes **dist/BeamDiagnostics-Windows-x64.zip** and its SHA-256 checksum. The ZIP includes the Python runtime, pinned libraries, and fresh camera settings. [Full user guide](USER_GUIDE.md) · [Third-party software](THIRD_PARTY.md)
+
+## Publish a portable release
+
+Increase the stable version in **VERSION** and push the release commit to **main**. The **Windows x64 release** workflow builds and tests the portable ZIP before publishing it on GitHub. If the workflow fails, rerun the original workflow for the same commit. If a draft already exists and you need to publish a corrected commit, increase **VERSION** again. [Release workflow](https://github.com/hpotts-dev/Senior-Design/actions/workflows/windows-release.yml)

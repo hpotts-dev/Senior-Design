@@ -3,7 +3,18 @@ name: Windows x64 release
 on:
   push:
     branches: [main]
-    paths: [.github/workflows/windows-release.yml, tools/build_portable_windows.py]
+    paths:
+      - VERSION
+      - .github/workflows/windows-release.yml
+      - tools/build_portable_windows.py
+      - beamdiag/**
+      - tests/**
+      - config.example.toml
+      - diagnostic_app.py
+      - pid_controller.py
+      - portable_launch.py
+      - updater.py
+      - 'requirements*.txt'
   workflow_dispatch:
 
 permissions:
@@ -11,15 +22,16 @@ permissions:
 
 concurrency:
   group: windows-release
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   build-and-publish:
     if: github.ref == 'refs/heads/main'
     runs-on: windows-2025
-    timeout-minutes: 15
+    timeout-minutes: 25
     env:
       QT_QPA_PLATFORM: offscreen
+      BEAMDIAG_SKIP_UPDATE: '1'
     steps:
       - uses: actions/checkout@v6
         with:
@@ -36,19 +48,81 @@ jobs:
           python tools/build_portable_windows.py
       - name: Test the extracted download
         run: |
+          $PSNativeCommandUseErrorActionPreference = $true
           Expand-Archive dist/BeamDiagnostics-Windows-x64.zip "$env:RUNNER_TEMP/Beam test"
           $app = "$env:RUNNER_TEMP/Beam test/BeamDiagnostics"
-          $result = & "$app/run_simulation.cmd" --duration 5 --record --wait-report
-          if ($LASTEXITCODE -ne 0) { throw "The extracted app failed" }
+          $result = & "$app/run_simulation.cmd" --duration 6
           $summary = ($result -join "`n") | ConvertFrom-Json
           if ($summary.recording.frames_saved -le 0 -or $summary.recording.frames_dropped -or
+              $summary.recording.write_errors -or !$summary.recording.drain_complete -or
               $summary.timing.host_to_display_submission.count -le 0 -or
-              !(Test-Path "$($summary.session)/human_readable/START_HERE.html")) {
-            throw "The extracted app did not produce the expected recording and report"
+              $summary.udp_control_replies -le 0 -or $summary.pid_process_exit_code -ne 0) {
+            throw "The extracted app did not finish a healthy GUI capture"
+          }
+          $session = $summary.session
+          foreach ($file in 'centroids.csv', 'average_fft.csv', 'pid.csv') {
+            if (@(Import-Csv -LiteralPath "$session/$file").Count -eq 0) {
+              throw "The extracted app did not write measurements to $file"
+            }
+          }
+          $fft = Import-Csv -LiteralPath "$session/average_fft.csv"
+          $partial = $fft | Where-Object { ([double]$_.end_s - [double]$_.start_s) -lt 60 }
+          if ($partial.camera -notcontains 'near_field' -or $partial.camera -notcontains 'far_field') {
+            throw "The extracted app did not flush partial FFT averages for both camera fields"
           }
       - name: Publish the verified ZIP
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $tag = "v1.0.0"
-          gh release create $tag dist/BeamDiagnostics-Windows-x64.zip --target $env:GITHUB_SHA --title "Beam Diagnostics $tag" --notes "Windows x64 portable ZIP. Extract it and open run_simulation.cmd, or follow the README to connect your Basler cameras."
+          $PSNativeCommandUseErrorActionPreference = $true
+          $version = (Get-Content VERSION -Raw).Trim()
+          $tag = "v$version"
+          $repo = $env:GITHUB_REPOSITORY
+          $zip = 'BeamDiagnostics-Windows-x64.zip'
+          $checksum = "$zip.sha256"
+          $releases = gh api "repos/$repo/releases?per_page=100" | ConvertFrom-Json
+          $existing = $releases | Where-Object tag_name -eq $tag
+          if ($existing -and !$existing.draft) {
+            if ($existing.assets.name -notcontains $zip -or $existing.assets.name -notcontains $checksum) {
+              throw "Published release $tag is missing an asset. Bump VERSION for a replacement."
+            }
+            Write-Host "$tag is already published. Increase VERSION to ship a new portable build."
+            exit 0
+          }
+          $latestStable = $releases | Where-Object {
+            !$_.draft -and !$_.prerelease -and $_.tag_name -match '^v\d+\.\d+\.\d+$'
+          } | ForEach-Object { [version]($_.tag_name.Substring(1)) } | Sort-Object -Descending | Select-Object -First 1
+          if ($latestStable -and [version]$version -le $latestStable) {
+            throw "VERSION must be newer than the latest stable release ($latestStable)."
+          }
+          $tagRefs = gh api "repos/$repo/git/matching-refs/tags/$tag" | ConvertFrom-Json
+          if ($tagRefs.ref -contains "refs/tags/$tag") {
+            $tagCommit = (gh api "repos/$repo/commits/$tag" | ConvertFrom-Json).sha
+            if ($tagCommit -ne $env:GITHUB_SHA) {
+              throw "Tag $tag already names another commit. Increase VERSION."
+            }
+          }
+          if (!$existing) {
+            gh release create $tag --draft --target $env:GITHUB_SHA --title "Beam Diagnostics $tag" --notes "Download the portable Windows x64 ZIP, extract it, and open run_simulation.cmd. For Basler setup, see the README."
+          } elseif ($existing.target_commitish -ne $env:GITHUB_SHA) {
+            throw "Draft $tag targets a different commit. Use a new VERSION or rerun the original workflow."
+          }
+          gh release upload $tag "dist/$zip" "dist/$checksum" --clobber
+          $assets = (gh api "repos/$repo/releases?per_page=100" | ConvertFrom-Json | Where-Object tag_name -eq $tag).assets
+          foreach ($file in $zip, $checksum) {
+            $asset = $assets | Where-Object name -eq $file
+            $digest = (Get-FileHash "dist/$file" -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($asset.state -ne 'uploaded' -or $asset.digest -ne "sha256:$digest") {
+              throw "GitHub could not verify the uploaded $file"
+            }
+          }
+          gh release edit $tag --draft=false --latest
+          $published = gh api "repos/$repo/releases/latest" | ConvertFrom-Json
+          if ($published.tag_name -ne $tag -or $published.assets.name -notcontains $zip -or
+              $published.assets.name -notcontains $checksum) {
+            throw "GitHub latest release is missing the verified download"
+          }
+          $publishedCommit = (gh api "repos/$repo/commits/$tag" | ConvertFrom-Json).sha
+          if ($publishedCommit -ne $env:GITHUB_SHA) {
+            throw "Published release tag does not match the tested commit"
+          }
