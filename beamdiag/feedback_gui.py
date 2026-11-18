@@ -17,24 +17,29 @@ class FeedbackSettingsDialog(QtWidgets.QDialog):
         self.pid_action = "apply"
         self.feedback_dirty = self.pid_dirty = False
         self.fields = {}
-        self.setWindowTitle("Far Field control feedback")
+        self.setWindowTitle("Beam approach feedback")
         self.resize(740, 700)
         layout = QtWidgets.QVBoxLayout(self)
-        intro = QtWidgets.QLabel("Far Field is the only PID source. Outputs are nominal, normalized commands; "
+        intro = QtWidgets.QLabel("PID uses the angle between the Near and Far Field displacements. Outputs are normalized; "
                                 "this application does not drive piezo hardware.")
         intro.setWordWrap(True)
         layout.addWidget(intro)
+        geometry = QtWidgets.QLabel("Approach angle = atan2(FF displacement − NF displacement, plane separation). "
+            "In Capture → Configuration, set plane_mm_per_pixel for both cameras and plane_separation_mm under PID.")
+        geometry.setWordWrap(True)
+        layout.addWidget(geometry)
         self.tabs = QtWidgets.QTabWidget()
         layout.addWidget(self.tabs, 1)
 
         calibration, region, tuning, limits = (QtWidgets.QWidget() for _ in range(4))
-        for page, label in ((calibration, "Calibration"), (region, "Beam region / target"),
+        for page, label in ((calibration, "FF angular readout"), (region, "Beam region / target"),
                             (tuning, "PID tuning"), (limits, "Limits / timing")):
             scroll = QtWidgets.QScrollArea()
             scroll.setWidgetResizable(True)
             scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
             scroll.setWidget(page)
             self.tabs.addTab(scroll, label)
+        self.tabs.setCurrentIndex(2)
         cal = QtWidgets.QVBoxLayout(calibration)
         equation = QtWidgets.QLabel("Angular error [X, Y] = calibration matrix × (centroid − reference), in µrad.\n"
                                     "Enter measured µrad/pixel. Off-diagonal terms account for axis coupling or rotation.")
@@ -113,7 +118,7 @@ class FeedbackSettingsDialog(QtWidgets.QDialog):
             for axis in range(2):
                 gains.addWidget(self.number(f"{key}_{axis}", -1e6, 1e6, 8, "pid"), row, axis+1)
         tune.addLayout(gains)
-        gain_note = QtWidgets.QLabel("The correcting sign is opposite centroid − reference. "
+        gain_note = QtWidgets.QLabel("The correcting sign is opposite the measured two-plane approach angle. "
             "Every applied calibration, target or PID change resets the integral and derivative history. "
             "Pause holds nominal output at zero while capture, centroid analysis and recording continue.")
         gain_note.setWordWrap(True)
@@ -198,7 +203,7 @@ class FeedbackSettingsDialog(QtWidgets.QDialog):
 
     def message(self, text, success=False):
         self.status.setText(text)
-        self.status.setStyleSheet("color: #71e0c0" if success else "color: #ffc46b")
+        self.status.setStyleSheet("color: #087446" if success else "color: #995100")
 
     @staticmethod
     def set_value(field, value):

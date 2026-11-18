@@ -4,6 +4,9 @@ from __future__ import annotations
 from time import perf_counter_ns
 from pathlib import Path
 import os
+import numpy as np
+from .alignment import plane_matrix
+from .plots import AxisPlot
 import cv2
 from PySide6 import QtCore, QtGui, QtWidgets
 
@@ -48,21 +51,39 @@ class ReferenceImage(QtWidgets.QLabel):
         super().mousePressEvent(event)
 
 
+def card_title(text, centered=False):
+    title = QtWidgets.QLabel(text)
+    title.setObjectName("cardTitle")
+    if centered:
+        title.setAlignment(QtCore.Qt.AlignCenter)
+    return title
+
+
 class CameraPanel(QtWidgets.QGroupBox):
     def __init__(self, role: str):
-        suffix = " (PID source)" if role == PID_SOURCE_ROLE else " (diagnostic)"
-        super().__init__(role.replace("_", " ").title()+suffix)
+        super().__init__()
         self.image = ReferenceImage()
         self.image.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        self.image.setMinimumSize(240, 200)
-        self.image.setStyleSheet("background: #080c12; color: #9eb2c8")
+        self.image.setMinimumSize(170, 145)
+        self.image.setStyleSheet("background: #080c12; color: #9eb2c8" if role == "dark_field" else
+                                "background: white; color: #65748a; border: 1px solid #c3ceda")
         self.image.setScaledContents(False)
         self.image.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Expanding)
         self.metrics = QtWidgets.QLabel()
-        self.metrics.setMinimumHeight(130)
+        self.metrics.setMinimumHeight(38)
         self.metrics.setWordWrap(True)
         layout = QtWidgets.QVBoxLayout(self)
+        layout.addWidget(card_title({"far_field":"FF", "near_field":"NF", "dark_field":"Dark Field"}[role], True))
+        if role != "dark_field":
+            self.coordinates = QtWidgets.QLabel("ΔX —    ΔY —", self.image)
+            self.coordinates.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents)
+            self.coordinates.setStyleSheet("background: white; border: 0; color: #17253b; padding: 3px; font-weight: bold")
+            overlay = QtWidgets.QVBoxLayout(self.image)
+            overlay.addWidget(self.coordinates, 0, QtCore.Qt.AlignTop | QtCore.Qt.AlignRight)
+            overlay.addStretch()
         layout.addWidget(self.image, 1)
+        self.options = QtWidgets.QWidget()
+        details = QtWidgets.QVBoxLayout(self.options)
         contrast = QtWidgets.QHBoxLayout()
         self.auto_contrast = QtWidgets.QCheckBox("Auto contrast (preview only)")
         self.auto_contrast.setChecked(True)
@@ -73,8 +94,11 @@ class CameraPanel(QtWidgets.QGroupBox):
         self.display_range.setToolTip("Native intensity mapped to black and white on screen; brighter preview pixels may clip.")
         contrast.addWidget(self.display_range)
         contrast.addStretch()
-        layout.addLayout(contrast)
+        details.addLayout(contrast)
         layout.addWidget(self.metrics)
+        if role != "dark_field":
+            self.trace = AxisPlot("Time (s)", "Displacement (px)", signed=True)
+            layout.addWidget(self.trace, 1)
         editor = QtWidgets.QHBoxLayout()
         self.reference_x = QtWidgets.QDoubleSpinBox()
         self.reference_y = QtWidgets.QDoubleSpinBox()
@@ -90,7 +114,7 @@ class CameraPanel(QtWidgets.QGroupBox):
         editor.addWidget(self.reference_y)
         self.apply_reference = QtWidgets.QPushButton("Set")
         editor.addWidget(self.apply_reference)
-        layout.addLayout(editor)
+        details.addLayout(editor)
         actions = QtWidgets.QHBoxLayout()
         self.use_centroid = QtWidgets.QPushButton("Use detected centroid")
         self.center = QtWidgets.QPushButton("Center reference")
@@ -98,14 +122,14 @@ class CameraPanel(QtWidgets.QGroupBox):
         self.camera_settings.setToolTip("Exposure, gain, frame rate, centroid thresholds and clipping limits")
         actions.addWidget(self.use_centroid)
         actions.addWidget(self.center)
-        actions.addWidget(self.camera_settings)
-        layout.addLayout(actions)
+        layout.addWidget(self.camera_settings)
+        details.addLayout(actions)
         self.background_button = QtWidgets.QPushButton("Subtract background…")
         self.background_button.setToolTip("Cover this camera first, then press to average and save a per-pixel dark reference. Uncover after the saved message.")
-        layout.addWidget(self.background_button)
+        details.addWidget(self.background_button)
         self.background_notice = QtWidgets.QLabel("Cover camera before capturing a background.")
         self.background_notice.setWordWrap(True)
-        layout.addWidget(self.background_notice)
+        details.addWidget(self.background_notice)
         if role == "dark_field":
             for widget in (self.reference_x, self.reference_y, self.apply_reference, self.use_centroid, self.center):
                 widget.setEnabled(False)
@@ -119,7 +143,10 @@ class CameraPanel(QtWidgets.QGroupBox):
             self.reference_notice.setText("Dark Field is displayed and captured without centroid processing.")
         self.reference_notice.setWordWrap(True)
         self.reference_notice.setMinimumHeight(34)
-        layout.addWidget(self.reference_notice)
+        details.addWidget(self.reference_notice)
+        details.addStretch()
+        self.options.setParent(self)
+        self.options.hide()
         self.last_sequence = -1
         self.display_dirty = False
         self.editor_revision: int | None = None
@@ -148,13 +175,36 @@ class DiagnosticWindow(QtWidgets.QMainWindow):
         scroll.setWidget(central)
         self.setCentralWidget(scroll)
         layout = QtWidgets.QVBoxLayout(central)
-        heading = QtWidgets.QLabel("BEAM DIAGNOSTICS  /  "+("SIMULATED CAMERAS · DEMO CALIBRATION" if engine.simulated else "LIVE BASLER CAMERAS"))
-        heading.setStyleSheet("font-size: 20px; font-weight: 600; padding: 8px")
-        layout.addWidget(heading)
-        row = QtWidgets.QHBoxLayout()
+        header = QtWidgets.QHBoxLayout()
+        heading = QtWidgets.QLabel("Beam Alignment")
+        heading.setStyleSheet("font-size: 29px; font-weight: bold; color: #101b31")
+        reticle = QtGui.QPixmap(38, 38)
+        reticle.fill(QtCore.Qt.transparent)
+        painter = QtGui.QPainter(reticle)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing)
+        painter.setPen(QtGui.QPen(QtGui.QColor("#0965e6"), 2))
+        painter.drawEllipse(7, 7, 24, 24)
+        painter.drawEllipse(16, 16, 6, 6)
+        for x1, y1, x2, y2 in ((0,19,11,19), (27,19,38,19), (19,0,19,11), (19,27,19,38)):
+            painter.drawLine(x1, y1, x2, y2)
+        painter.end()
+        icon = QtWidgets.QLabel()
+        icon.setPixmap(reticle)
+        header.addWidget(icon)
+        header.addWidget(heading)
+        header.addStretch()
+        header.addWidget(QtWidgets.QLabel("●  Demo" if engine.simulated else "●  Live Basler"))
+        layout.addLayout(header)
+        grid = QtWidgets.QGridLayout()
+        layout.addLayout(grid, 1)
         self.panels = {r: CameraPanel(r) for r in engine.workers}
+        grid.addWidget(self.panels["near_field"], 0, 0, 3, 1)
+        grid.addWidget(self.panels["far_field"], 0, 1, 3, 1)
+        self.panels["dark_field"].setParent(self)
+        self.panels["dark_field"].hide()
+        self.episodes = 0
+        self.alarm = None
         for role, panel in self.panels.items():
-            row.addWidget(panel)
             panel.image.reference_selected.connect(lambda x, y, r=role: self._manual_reference(r, x, y))
             panel.apply_reference.clicked.connect(lambda checked=False, r=role: self._numeric_reference(r))
             panel.use_centroid.clicked.connect(lambda checked=False, r=role: self._show_reference_changes(
@@ -164,52 +214,80 @@ class DiagnosticWindow(QtWidgets.QMainWindow):
             panel.camera_settings.clicked.connect(lambda checked=False, r=role: self._camera_settings(r))
             panel.background_button.clicked.connect(lambda checked=False, r=role: self._background(r))
             panel.auto_contrast.toggled.connect(lambda checked=False, r=role: self._display_contrast(r))
-        layout.addLayout(row, 1)
-        controls = QtWidgets.QHBoxLayout()
-        self.record = QtWidgets.QPushButton("Record frames (R)")
-        self.record.setCheckable(True)
-        self.record.setChecked(engine.recorder.recording.is_set())
-        self.record.toggled.connect(self._record)
-        controls.addWidget(self.record)
-        snapshot = QtWidgets.QPushButton("Save current frames (S)")
-        snapshot.clicked.connect(self._snapshot)
-        controls.addWidget(snapshot)
-        reference = QtWidgets.QPushButton("Use detected centroids (Z)")
-        reference.clicked.connect(self._references)
-        controls.addWidget(reference)
-        feedback = QtWidgets.QPushButton("Control feedback…")
+        pid = QtWidgets.QGroupBox()
+        pid_layout = QtWidgets.QVBoxLayout(pid)
+        pid_heading = QtWidgets.QHBoxLayout()
+        pid_heading.addWidget(card_title("PID"), 1)
+        pid_layout.addLayout(pid_heading)
+        pid_row = QtWidgets.QHBoxLayout()
+        pid_layout.addLayout(pid_row, 1)
+        equation = QtWidgets.QLabel("Equation<br><br><i>PID(s) = K<sub>p</sub> + K<sub>i</sub>/s + K<sub>d</sub> · s</i>")
+        equation.setStyleSheet("font-size: 18px; padding: 6px")
+        pid_row.addWidget(equation)
+        self.status = QtWidgets.QLabel("Current output · waiting")
+        self.status.setWordWrap(True)
+        pid_row.addWidget(self.status, 1)
+        feedback = QtWidgets.QPushButton("Settings")
         feedback.clicked.connect(self._feedback_settings)
-        controls.addWidget(feedback)
-        self.config_button = QtWidgets.QPushButton("Configuration…")
-        self.config_button.clicked.connect(self._configuration)
-        controls.addWidget(self.config_button)
-        controls.addStretch()
-        stop = QtWidgets.QPushButton("Stop")
-        stop.clicked.connect(self.close)
-        controls.addWidget(stop)
-        layout.addLayout(controls)
+        pid_heading.addWidget(feedback)
+        self.status.setStyleSheet("font-size: 17px; padding: 6px; border-left: 1px solid #c6d1de")
+        grid.addWidget(pid, 0, 2, 1, 2)
+        self.fft = {}
+        for col, role, title in ((2, "near_field", "NF FFT"), (3, "far_field", "FF FFT")):
+            box = QtWidgets.QGroupBox()
+            self.fft[role] = AxisPlot("Frequency (Hz)", "Magnitude (px)")
+            chart_layout = QtWidgets.QVBoxLayout(box)
+            chart_layout.addWidget(card_title(title))
+            chart_layout.addWidget(self.fft[role], 1)
+            grid.addWidget(box, 1, col)
+        self.df_status = QtWidgets.QLabel("DF Status     Waiting")
+        self.df_status.setObjectName("dfStatus")
+        grid.addWidget(self.df_status, 3, 0)
+        show_df = QtWidgets.QPushButton("Show DF")
+        show_df.clicked.connect(lambda: self._camera_settings("dark_field"))
+        grid.addWidget(show_df, 3, 1)
+        output = QtWidgets.QGroupBox()
+        output_layout = QtWidgets.QVBoxLayout(output)
+        output_layout.addWidget(card_title("Output Settings"))
         timed = QtWidgets.QHBoxLayout()
-        timed.addWidget(QtWidgets.QLabel("Always-on image capture interval (seconds):"))
+        timed.addWidget(QtWidgets.QLabel("Capture one image every"))
         self.snapshot_interval = QtWidgets.QDoubleSpinBox()
         self.snapshot_interval.setRange(.1, 86400)
         self.snapshot_interval.setDecimals(2)
+        self.snapshot_interval.setSuffix(" s")
         self.snapshot_interval.setKeyboardTracking(False)
         self.snapshot_interval.setValue(engine.cfg.recording.snapshot_interval_s)
         timed.addWidget(self.snapshot_interval)
-        self.apply_interval = QtWidgets.QPushButton("Apply interval and capture")
+        self.apply_interval = QtWidgets.QPushButton("Apply")
         self.apply_interval.clicked.connect(self._apply_snapshot_interval)
         timed.addWidget(self.apply_interval)
-        self.restart_timer = QtWidgets.QPushButton("Capture now / restart timer")
+        output_layout.addLayout(timed)
+        view = QtWidgets.QPushButton("View Output Data")
+        view.setObjectName("viewData")
+        view.clicked.connect(lambda: QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(self.engine.readable_dir))))
+        output_layout.addWidget(view)
+        grid.addWidget(output, 2, 2, 2, 2)
+        for col in range(4):
+            grid.setColumnStretch(col, 1)
+        grid.setRowStretch(0, 2)
+        grid.setRowStretch(1, 4)
+        grid.setRowStretch(2, 1)
+        menu = self.menuBar().addMenu("Capture")
+        self.record = menu.addAction("Record all frames (R)")
+        self.record.setCheckable(True)
+        self.record.setChecked(engine.recorder.recording.is_set())
+        self.record.toggled.connect(self._record)
+        menu.addAction("Snapshot (S)", self._snapshot)
+        menu.addAction("Use detected centroids (Z)", self._references)
+        self.restart_timer = QtWidgets.QPushButton("Restart snapshot timer")
         self.restart_timer.clicked.connect(lambda: self.engine.recorder.restart_snapshot_timer())
-        timed.addWidget(self.restart_timer)
-        timed.addStretch()
-        layout.addLayout(timed)
-        self.status = QtWidgets.QLabel()
-        self.status.setWordWrap(True)
-        layout.addWidget(self.status)
-        location = self.location = QtWidgets.QLabel(f"Capture folder: {engine.capture_dir}\nRaw data, readable CSVs and timed PNGs are written live. Timed capture stays active while Record is off.")
-        location.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
-        layout.addWidget(location)
+        menu.addAction("Restart snapshot timer", self.restart_timer.click)
+        self.config_button = QtWidgets.QPushButton("Configuration")
+        self.config_button.clicked.connect(self._configuration)
+        menu.addAction("Configuration…", self.config_button.click)
+        self.location = QtWidgets.QLabel(str(engine.capture_dir))
+        self.location.setToolTip(str(engine.capture_dir))
+        self.statusBar().addWidget(self.location)
         self.shortcuts = []
         for key, callback in [("R", self.record.toggle), ("S", self._snapshot), ("Z", self._references), ("Q", self.close)]:
             shortcut = QtGui.QShortcut(QtGui.QKeySequence(key), self)
@@ -263,7 +341,12 @@ class DiagnosticWindow(QtWidgets.QMainWindow):
         self.centralWidget().setEnabled(not active)
         if active:
             self.timer.stop()
-            for dialog in self.settings_dialogs.values():
+            for role, dialog in self.settings_dialogs.items():
+                panel = self.panels[role]
+                panel.options.setParent(panel)
+                panel.options.hide()
+                if role == "dark_field":
+                    panel.image.setParent(panel)
                 dialog.close()
                 dialog.deleteLater()
             self.settings_dialogs.clear()
@@ -279,7 +362,8 @@ class DiagnosticWindow(QtWidgets.QMainWindow):
             panel.last_sequence = -1
             panel.editor_revision = None
         self.snapshot_interval.setValue(self.engine.cfg.recording.snapshot_interval_s)
-        self.location.setText(f"Capture folder: {self.engine.capture_dir}\nFiles are written live. Timed capture stays active while Record is off.")
+        self.location.setText(str(self.engine.capture_dir))
+        self.episodes = 0
 
     def _references(self):
         self._show_reference_changes(self.engine.set_references_detailed())
@@ -289,6 +373,14 @@ class DiagnosticWindow(QtWidgets.QMainWindow):
             from .settings_gui import CameraSettingsDialog
             self.settings_dialogs[role] = CameraSettingsDialog(self.engine, role, self,
                 preview_control=self.panels[role].auto_contrast)
+            panel = self.panels[role]
+            dialog = self.settings_dialogs[role]
+            if role == "dark_field":
+                dialog.layout().insertWidget(0, panel.image)
+                dialog.resize(570, 790)
+            dialog.tabs.addTab(panel.options, "Image controls")
+            if role == "dark_field":
+                panel.image.show()
         dialog = self.settings_dialogs[role]
         dialog.show()
         dialog.raise_()
@@ -316,11 +408,11 @@ class DiagnosticWindow(QtWidgets.QMainWindow):
             panel = self.panels[change.role]
             if change.applied:
                 panel.reference_notice.setText(f"Reference set to ({change.x:.3f}, {change.y:.3f}) px.")
-                panel.reference_notice.setStyleSheet("color: #71e0c0")
+                panel.reference_notice.setStyleSheet("color: #087446")
                 panel.display_dirty = True
             else:
                 panel.reference_notice.setText(f"Reference unchanged: {change.reason}.")
-                panel.reference_notice.setStyleSheet("color: #ffc46b")
+                panel.reference_notice.setStyleSheet("color: #995100")
         count = sum(change.applied for change in changes)
         self.statusBar().showMessage(f"Set {count} of {len(changes)} references. See each camera's message.", 6000)
         # Refresh even if the camera has not delivered another frame: the target is a UI action.
@@ -345,14 +437,23 @@ class DiagnosticWindow(QtWidgets.QMainWindow):
                         max(1, panel.image.height())/image.shape[0])
             if scale < 1:
                 image = resize_preview(image, max(1, round(image.shape[1]*scale)), max(1, round(image.shape[0]*scale)))
+            if role != "dark_field" and panel.auto_contrast.isChecked():
+                floor = float(np.percentile(image[::4, ::4], 50))
+                image = cv2.subtract(image, floor)
             image, white = preview_u8(image, worker.cfg.pixel_format, panel.auto_contrast.isChecked())
             panel.display_range.setText(f"0–{white:.0f} DN")
             # Display overlay lives in a small display-only copy; raw recorded pixels are untouched.
-            display = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
+            display = cv2.cvtColor(image if role == "dark_field" else 255-image, cv2.COLOR_GRAY2RGB)
             height, width = frame.image.shape
             rx, ry, revision = worker.processor.reference_state(width, height)
             panel.sync_reference(rx, ry, revision, width, height)
             sx, sy = display.shape[1]/width, display.shape[0]/height
+            if role != "dark_field":
+                cx, cy = round((rx+.5)*sx-.5), round((ry+.5)*sy-.5)
+                for x in range(0, display.shape[1], 10):
+                    cv2.line(display, (x, cy), (x+5, cy), (110, 125, 145), 1)
+                for y in range(0, display.shape[0], 10):
+                    cv2.line(display, (cx, y), (cx, y+5), (110, 125, 145), 1)
             if worker.cfg.analysis_roi:
                 x, y, w, h = worker.cfg.analysis_roi
                 cv2.rectangle(display, (round(x*sx), round(y*sy)),
@@ -385,32 +486,54 @@ class DiagnosticWindow(QtWidgets.QMainWindow):
             if not item:
                 panel.metrics.setText(f"{s['state']}\n{s['last_error']}")
                 continue
-            m = item.measurement
-            image_age = (perf_counter_ns()-item.frame.received_ns)/1e6+(item.frame.camera_to_host_ms or 0)
-            if m is None:
-                panel.metrics.setText(f"{s['state']} · {s['fps']:.1f} fps · frame {item.frame.sequence}\n"
-                    f"Dark Field: display and capture only\n{worker.cfg.pixel_format} · {item.frame.image.shape[1]} × {item.frame.image.shape[0]}\n"
-                    f"Image age {image_age:.1f} ms\n"
-                    f"SDK skipped {s['sdk_skipped']} · failures {s['errors']} · {s['last_error']}")
+            if role == "dark_field":
                 continue
-            height, width = item.frame.image.shape
-            rx, ry, _ = worker.processor.reference_state(width, height)
-            angular = f"({m.error_x_urad:+.3f}, {m.error_y_urad:+.3f}) µrad" if m.angular_valid else m.reason.upper()
-            stale = " · STALE" if s["age_ms"] > self.engine.cfg.pid.watchdog_ms else ""
-            panel.metrics.setText(f"{s['state']}{stale} · {s['fps']:.1f} fps · frame {m.sequence}\n"
-                f"Centroid ({m.centroid_x:.3f}, {m.centroid_y:.3f}) px\n"
-                f"Reference ({rx:.3f}, {ry:.3f}) px\n"
-                f"Peak {m.peak:g} DN · clipped {100*m.saturated_fraction:.2f}%\n"
-                f"Displacement ({m.error_x_px:+.3f}, {m.error_y_px:+.3f}) px\nError {angular}\n"
-                f"Processing {m.host_processing_ms:.2f} ms · image age {image_age:.1f} ms\n"
-                f"SDK skipped {s['sdk_skipped']} · failures {s['errors']} · {s['last_error']}")
+            m = item.measurement
+            history, spectrum = self.engine.series[role].snapshot()
+            unit = "px"
+            matrix = plane_matrix(worker.cfg, self.engine.simulated)
+            points = np.asarray(history, dtype=float).reshape(-1, 3)
+            delta = np.array([m.error_x_px, m.error_y_px])
+            if matrix:
+                transform = np.asarray(matrix).T/25.4
+                points[:, 1:] = points[:, 1:] @ transform
+                delta = delta @ transform
+                unit = "in"
+            if len(points):
+                points[:, 0] -= points[0, 0]
+            radii = np.linalg.norm(points[:, 1:], axis=1)
+            radii = radii[np.isfinite(radii)]
+            panel.trace.vertical = f"Displacement ({unit})"
+            panel.trace.set_points(points)
+            self.fft[role].set_points(zip(spectrum[0], *spectrum[1].T) if spectrum is not None else ())
+            if m.centroid_valid:
+                panel.coordinates.setText(f"ΔX  {delta[0]:+.5g} {unit}\nΔY  {delta[1]:+.5g} {unit}")
+                label = ""
+                if len(radii):
+                    label += (f"RMS {np.sqrt(np.mean(radii**2)):.4g}    PV {np.ptp(radii):.4g}"
+                              f"    Δ {np.linalg.norm(delta):.4g} {unit}")
+            else:
+                panel.coordinates.setText("ΔX —    ΔY —")
+                label = f"Centroid unavailable · {m.reason}"
+            panel.metrics.setText(label)
+        stamp, state, episodes = self.engine.dark_field.snapshot
+        if stamp is None or perf_counter_ns()-stamp > max(1e9, 2.5e9/self.engine.workers["dark_field"].cfg.fps):
+            state = "Waiting"
+        color = {"Waiting": "#65748a", "OK": "#087d43", "BAD": "#b8172b"}[state]
+        self.df_status.setText(f"DF Status     <b style='color:{color}'>{state}</b>")
+        if episodes > self.episodes:
+            self.episodes = episodes
+            if self.alarm is None:
+                self.alarm = QtWidgets.QMessageBox(QtWidgets.QMessageBox.Warning, "Dark Field",
+                    "Aberrations detected in the DF.", QtWidgets.QMessageBox.Ok, self)
+                self.alarm.setModal(False)
+            self.alarm.show()
         r, p = stats["recording"], stats["control"]
-        elapsed = p["host_to_pid_ms"]
-        timing = f"{elapsed:.2f} ms" if elapsed is not None else "waiting"
-        self.status.setText(f"Nominal PID · Far Field only [{p['state']}]: X {p['x']:+.5f}, Y {p['y']:+.5f} normalized · "
-            f"host retrieval → PID {timing}\n{p['reason']}\nSaved {r['frames_saved']} · queue {r['frame_queue']} · "
-            f"frame drops {r['frames_dropped']} · telemetry drops {r['telemetry_dropped']} · "
-            f"write failures {r['write_errors']} {r['last_error']}")
+        self.status.setText(f"Current output · {p['state']}\nX  {p['x']:+.5f}    Y  {p['y']:+.5f}\nNormalized")
+        self.status.setToolTip(p["reason"])
+        if r["write_errors"] or r["frames_dropped"] or r["telemetry_dropped"]:
+            self.statusBar().showMessage(f"Capture: {r['frames_dropped']} image drops, "
+                f"{r['telemetry_dropped']} sample drops, {r['write_errors']} write errors. {r['last_error']}")
         self.record.blockSignals(True)
         self.record.setChecked(r["recording"])
         self.record.setText("Stop recording (R)" if r["recording"] else "Record frames (R)")
@@ -441,11 +564,20 @@ def create_application():
             QtGui.QFontDatabase.addApplicationFont(str(font))
     app.setFont(QtGui.QFont("Segoe UI", 10))
     app.setStyle("Fusion")
-    app.setStyleSheet("QWidget { background: #141c27; color: #dbe6f2; font-size: 13px; } "
-        "QGroupBox { border: 1px solid #34445b; border-radius: 6px; margin-top: 14px; padding-top: 14px; } "
-        "QGroupBox::title { subcontrol-origin: margin; left: 12px; } "
-        "QPushButton { background: #26384e; padding: 10px; border-radius: 4px; } "
-        "QPushButton:checked { background: #14654c; } QStatusBar { color: #71e0c0; }")
+    app.setStyleSheet("""
+        QWidget { color: #122038; font-family: 'Segoe UI'; font-size: 13px; }
+        QMainWindow, QScrollArea, QDialog { background: #f7f9fc; }
+        QGroupBox { background: white; border: 1px solid #aab9ca; border-top: 3px solid #2677de;
+                    border-radius: 5px; margin-top: 12px; padding: 24px 6px 6px; font-weight: bold; }
+        QLabel#cardTitle { background: #e6ebf2; font-size: 22px; font-weight: bold; padding: 5px 9px; }
+        QGroupBox:!flat { padding: 4px; margin-top: 0; }
+        QGroupBox::title { subcontrol-origin: padding; subcontrol-position: top left;
+                        background: #e8edf4; padding: 3px 13px; font-size: 19px; }
+        QPushButton { background: #eaf0f6; border: 1px solid #a6b4c4; padding: 7px 12px; border-radius: 4px; }
+        QPushButton:hover { background: #dae8fa; }
+        QPushButton#viewData { color: white; background: #075bee; font-weight: bold; padding: 12px; }
+        QLabel#dfStatus { background: white; border: 1px solid #acbbcd; padding: 7px; font-size: 18px; }
+    """)
     return app
 
 

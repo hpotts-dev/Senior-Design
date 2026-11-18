@@ -1,5 +1,8 @@
 # Three-camera beam diagnostics
 
+For the current Beam Alignment dashboard, two-plane PID calibration and compact CSV capture, see the [dashboard guide](README.md). The procedures below describe the earlier interface and raw/report capture mode.
+
+
 An expandable Python framework for **Far Field, Dark Field, and Near Field Basler GigE cameras**, live display, raw-frame capture, centroid displacement, and a separate nominal two-axis PID process. The supplied configuration captures the **entire 1456 × 1088 sensor** of each dmA1440-73gm using **lossless packed Mono12p transmission**, decoded to the original 12-bit values in uint16 containers for processing and saving, with zero offsets and an image-centered reference. With the YuanLey YS2083GS-P switch, all camera links negotiate **1 Gb/s**. The supplied profile requests **12 fps for Far Field and Near Field**, and **6 fps for Dark Field**. This profile passed a one-minute live recording and display test on this setup; verify performance on another PC. The processing target remains under 50 ms after retrieval. Simulation works without cameras.
 
 ## Run

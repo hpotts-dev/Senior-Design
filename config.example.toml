@@ -5,6 +5,8 @@ latency_target_ms = 50.0
 network_budget_MBps = 90.0
 
 [recording]
+compact_output = true
+fft_interval_s = 60.0
 output_dir = "captures"
 format = "npy_stream"
 stream_rollover_MB = 512
@@ -14,9 +16,10 @@ every_n_frames = 1
 start_recording = false
 generate_readable = true
 readable_image_interval_s = 60.0
-snapshot_interval_s = 60.0
+snapshot_interval_s = 5.0
 
 [pid]
+plane_separation_mm = 0.0
 source_role = "far_field"
 host = "127.0.0.1"
 port = 49152
@@ -58,12 +61,15 @@ max_saturated_fraction = 0.01
 saturation_level = 0
 reference_px = []
 urad_per_pixel = [[17.25, 0.0], [0.0, 17.25]]
+plane_mm_per_pixel = []
 calibration_confirmed = false
 background_file = ""
 background_frames = 16
 
 [[cameras]]
 role = "dark_field"
+df_mean_limit_dn = 100.0
+df_hold_s = 0.5
 serial = ""
 width = 1456
 height = 1088
@@ -88,6 +94,7 @@ max_saturated_fraction = 0.01
 saturation_level = 0
 reference_px = []
 urad_per_pixel = [[17.25, 0.0], [0.0, 17.25]]
+plane_mm_per_pixel = []
 calibration_confirmed = false
 background_file = ""
 background_frames = 16
@@ -118,6 +125,7 @@ max_saturated_fraction = 0.01
 saturation_level = 0
 reference_px = []
 urad_per_pixel = [[17.25, 0.0], [0.0, 17.25]]
+plane_mm_per_pixel = []
 calibration_confirmed = false
 background_file = ""
 background_frames = 16

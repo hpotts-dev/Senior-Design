@@ -230,7 +230,9 @@ class DarkFieldSettingsUITests(unittest.TestCase):
         dialog.refresh()
         self.assertTrue(dialog.isVisible())
         self.assertIsNone(self.worker.latest.read().measurement)
-        self.assertEqual(dialog.tabs.count(), 1)
+        self.assertEqual(dialog.tabs.count(), 2)
+        self.assertIn("df_hold_s", dialog.fields)
+        self.assertTrue(self.window.panels["dark_field"].image.isVisible())
         self.assertEqual(dialog.tabs.tabText(0), "Camera")
         self.assertIn("no centroid", dialog.live.text())
         for key in ("exposure_us", "gain", "fps"):

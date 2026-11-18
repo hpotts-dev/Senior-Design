@@ -1,5 +1,8 @@
 # Live capture controls
 
+For the current Beam Alignment dashboard, two-plane PID calibration and compact CSV capture, see the [dashboard guide](README.md). The procedures below describe the earlier interface and raw/report capture mode.
+
+
 The supplied configuration captures the **full 1456 × 1088 sensor in Mono12**, at zero offsets, with the default reference at the image center (727.5, 543.5). Far Field and Near Field request **12 fps**, while Dark Field requests **6 fps**. This profile passed a one-minute live recording and display test on this setup. All camera links negotiated 1 Gb/s in the hardware test. The sensor's 12-bit values (0–4095) are retained in 16-bit native files and PNGs. Separate 8-bit display PNGs make these images easy to view without changing the measurement data. Lossless Mono12p packing is used only during transmission, then decoded to the original uint16 pixel values. Live **Auto contrast (preview only)** improves visibility without changing image geometry or measurement data.
 
 ## Images and continuous recording

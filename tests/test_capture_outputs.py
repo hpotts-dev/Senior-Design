@@ -168,7 +168,7 @@ class CaptureReportProcessTests(unittest.TestCase):
             config.write_text((ROOT/"config.example.toml").read_text().replace("port = 49152", f"port = {port}"))
             cfg = load_config(config)
             cfg = replace(cfg, cameras=tuple(replace(c, width=64, height=64) for c in cfg.cameras),
-                          recording=replace(cfg.recording, output_dir=str(folder/"captures"), start_recording=True))
+                          recording=replace(cfg.recording, compact_output=False, output_dir=str(folder/"captures"), start_recording=True))
             engine = DiagnosticEngine(cfg, config, ROOT, simulated=True)
             try:
                 engine.start()

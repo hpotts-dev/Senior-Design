@@ -2,7 +2,7 @@
 import cv2
 from PySide6 import QtCore, QtWidgets
 
-from .camera_settings import ACQUISITION_FIELDS, LIVE_FIELDS
+from .camera_settings import ACQUISITION_FIELDS, DETECTION_FIELDS, DF_FIELDS
 from .config import PIXEL_BITS, PID_SOURCE_ROLE
 
 
@@ -18,7 +18,7 @@ class CameraSettingsDialog(QtWidgets.QDialog):
         self.loaded_field_values = {}
         self._brightness_frame = None
         self._raw_mean = self._raw_peak = 0.0
-        self.active_fields = ACQUISITION_FIELDS if role == "dark_field" else LIVE_FIELDS
+        self.active_fields = ACQUISITION_FIELDS + (DF_FIELDS if role == "dark_field" else DETECTION_FIELDS)
         self.setWindowTitle(role.replace("_", " ").title()+" camera settings")
         self.resize(550, 570)
         self.fields = {}
@@ -27,7 +27,10 @@ class CameraSettingsDialog(QtWidgets.QDialog):
         self.tabs = tabs = QtWidgets.QTabWidget()
         camera_page, detection_page = QtWidgets.QWidget(tabs), QtWidgets.QWidget(tabs)
         camera_form, detection_form = QtWidgets.QFormLayout(camera_page), QtWidgets.QFormLayout(detection_page)
-        tabs.addTab(camera_page, "Camera")
+        camera_scroll = QtWidgets.QScrollArea()
+        camera_scroll.setWidgetResizable(True)
+        camera_scroll.setWidget(camera_page)
+        tabs.addTab(camera_scroll, "Camera")
         if role != "dark_field":
             tabs.addTab(detection_page, "Centroid / clipping")
         else:
@@ -46,6 +49,23 @@ class CameraSettingsDialog(QtWidgets.QDialog):
             (detection_form, "min_flux", "Minimum integrated signal", 0, 1e12, 1, "Reject centroids whose summed signal is at or below this value."),
             (detection_form, "max_saturated_fraction", "Maximum clipped pixels (%)", 0, 100, 3, "Reject a frame if more than this percentage of the analysis ROI is clipped."),
         )
+        if role == "dark_field":
+            rows += (
+                (camera_form, "df_mean_limit_dn", "Alarm mean brightness (DN)", 0, adc_max, 2,
+                 "Mean native brightness above this limit starts the alarm timer."),
+                (camera_form, "df_hold_s", "Alarm hold time (s)", .01, 3600, 2,
+                 "Bright frames must persist for this duration."),
+            )
+        self.fft_interval = QtWidgets.QDoubleSpinBox()
+        self.fft_interval.setRange(1, 86400)
+        self.fft_interval.setValue(engine.cfg.recording.fft_interval_s)
+        self.fft_interval.setSuffix(" s")
+        fft_row = QtWidgets.QHBoxLayout()
+        fft_row.addWidget(self.fft_interval)
+        apply_fft = QtWidgets.QPushButton("Save FFT interval")
+        apply_fft.clicked.connect(self.apply_fft_interval)
+        fft_row.addWidget(apply_fft)
+        camera_form.addRow("NF + FF spectrum average", fft_row)
         for form, key, label, low, high, decimals, tooltip in rows:
             field = QtWidgets.QDoubleSpinBox()
             field.setDecimals(decimals)
@@ -122,6 +142,14 @@ class CameraSettingsDialog(QtWidgets.QDialog):
         self.load_values(self.worker.controls.read()["values"])
         self.refresh()
 
+    def apply_fft_interval(self):
+        self.fft_interval.interpretText()
+        try:
+            self.engine.set_fft_interval(self.fft_interval.value())
+            self.status.setText("FFT averaging interval saved for both fields.")
+        except (ValueError, OSError) as exc:
+            self.status.setText(str(exc))
+
     def load_values(self, values):
         for key, field in self.fields.items():
             field.blockSignals(True)
@@ -136,7 +164,7 @@ class CameraSettingsDialog(QtWidgets.QDialog):
         self.dirty = True
         if self.pending_id is None:
             self.status.setText("Edits are not yet applied. Press Apply to send them to the camera worker.")
-            self.status.setStyleSheet("color: #ffc46b")
+            self.status.setStyleSheet("color: #995100")
 
     def update_preview_note(self):
         if self.preview_auto_contrast.isChecked():
@@ -161,7 +189,7 @@ class CameraSettingsDialog(QtWidgets.QDialog):
     def reload(self):
         self.load_values(self.worker.controls.read()["values"])
         self.status.setText("Live values reloaded; no unsent edits.")
-        self.status.setStyleSheet("color: #71e0c0")
+        self.status.setStyleSheet("color: #087446")
 
     def apply(self):
         # Apply can be clicked without moving focus away from the spin box first.
@@ -178,7 +206,7 @@ class CameraSettingsDialog(QtWidgets.QDialog):
             self.pending_id = self.engine.queue_camera_settings(self.role, patch)
         except ValueError as exc:
             self.status.setText(str(exc))
-            self.status.setStyleSheet("color: #ffc46b")
+            self.status.setStyleSheet("color: #995100")
             return
         self.status.setText("Queued; waiting for the camera worker…")
         self.refresh()
@@ -189,7 +217,7 @@ class CameraSettingsDialog(QtWidgets.QDialog):
             self.load_values(state["values"])
             self.pending_id = None
             self.status.setText(state["last_update_message"])
-            self.status.setStyleSheet("color: #71e0c0" if state["last_update_status"] == "applied" else "color: #ffc46b")
+            self.status.setStyleSheet("color: #087446" if state["last_update_status"] == "applied" else "color: #995100")
         ready, pending = state["ready"], state["status"] == "queued" or self.pending_id is not None
         caps = state.get("capabilities", {})
         ranges = []
@@ -224,12 +252,12 @@ class CameraSettingsDialog(QtWidgets.QDialog):
             self.loaded = True
             if self.pending_id is None:
                 self.status.setText(state["message"])
-                self.status.setStyleSheet("color: #71e0c0")
+                self.status.setStyleSheet("color: #087446")
         elif ready and not pending and not self.dirty and state["values"] != self.loaded_values:
             self.load_values(state["values"])
         if not ready:
             self.status.setText(state["message"])
-        for key in ("background", "threshold", "min_flux", "saturation_level", "max_saturated_fraction"):
+        for key in (*DETECTION_FIELDS, *(key for key in DF_FIELDS if key in self.fields)):
             self.fields[key].setEnabled(key in self.active_fields and ready and not pending)
         self.apply_button.setEnabled(ready and not pending)
         self.reload_button.setEnabled(not pending)
@@ -259,6 +287,8 @@ class CameraSettingsDialog(QtWidgets.QDialog):
             self.live.setText("Waiting for a frame")
 
     def showEvent(self, event):
+        if hasattr(self, "fft_interval"):
+            self.fft_interval.setValue(self.engine.cfg.recording.fft_interval_s)
         self.loaded = False
         self.refresh()
         self.timer.start()

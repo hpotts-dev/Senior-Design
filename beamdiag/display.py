@@ -18,8 +18,8 @@ def preview_u8(image: np.ndarray, pixel_format: str, auto_contrast: bool = True)
         # This avoids partitioning a full preview on every frame.
         step = max(1, int(np.ceil(np.sqrt(image.size/16384))))
         white = float(np.percentile(image[::step, ::step], 99.5))
-        if white <= 0:
-            # Preserve isolated small spots on an otherwise completely black frame.
+        if white <= float(image.min()):
+            # Preserve isolated small spots on an otherwise constant background.
             white = float(image.max())
         white = max(1.0, min(float(native_max), white))
     return cv2.convertScaleAbs(image, alpha=255/white), white

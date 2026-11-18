@@ -167,7 +167,7 @@ class WorkerSettingsTests(unittest.TestCase):
             probe.bind(("127.0.0.1", 0))
             port = probe.getsockname()[1]
         cfg = AppConfig(cameras=tuple(CameraConfig(role, width=64, height=64) for role in ROLES),
-                        pid=PIDConfig(port=port), recording=RecordingConfig(output_dir=self.tmp.name))
+                        pid=PIDConfig(port=port), recording=RecordingConfig(output_dir=self.tmp.name, compact_output=False))
         self.engine = DiagnosticEngine(cfg, ROOT/"config.toml", ROOT, simulated=False, launch_pid=False, generate_reports=False)
         self.sources = {}
         def make_source(cfg):

@@ -41,11 +41,16 @@ class CameraConfig:
     urad_per_pixel: tuple[tuple[float, float], ...] = ((17.25, 0.0), (0.0, 17.25))
     calibration_confirmed: bool = False
     background_file: str = ""  # Per-pixel dark reference, relative to config.toml when possible.
+    plane_mm_per_pixel: tuple = ()  # Measured 2x2 transform into common transverse axes.
+    df_mean_limit_dn: float = 100.0
+    df_hold_s: float = 0.5
     background_frames: int = 16
 
 
 @dataclass(frozen=True, slots=True)
 class RecordingConfig:
+    compact_output: bool = True
+    fft_interval_s: float = 60.0
     output_dir: str = "captures"
     format: str = "npy_stream"
     stream_rollover_MB: int = 512
@@ -55,11 +60,12 @@ class RecordingConfig:
     start_recording: bool = False
     generate_readable: bool = True
     readable_image_interval_s: float = 60.0  # Legacy/offline export cadence.
-    snapshot_interval_s: float = 60.0  # Always-on timed native + PNG snapshots, independent of Record.
+    snapshot_interval_s: float = 5.0  # Always-on timed native + PNG snapshots, independent of Record.
 
 
 @dataclass(frozen=True, slots=True)
 class PIDConfig:
+    plane_separation_mm: float = 0.0  # Zero means unmeasured.
     source_role: str = PID_SOURCE_ROLE
     host: str = "127.0.0.1"
     port: int = 49152
@@ -133,6 +139,15 @@ def validate(cfg: AppConfig) -> AppConfig:
             raise ValueError(f"{c.role}: invalid saturation fraction")
         if not 0 <= c.saturation_level <= (1 << PIXEL_BITS[c.pixel_format])-1:
             raise ValueError(f"{c.role}: clipping level exceeds the pixel format's ADC range")
+        if c.df_mean_limit_dn < 0 or c.df_hold_s <= 0:
+            raise ValueError("Dark Field brightness limit must be nonnegative and hold time positive")
+        if c.plane_mm_per_pixel:
+            matrix = c.plane_mm_per_pixel
+            if len(matrix) != 2 or any(len(row) != 2 for row in matrix):
+                raise ValueError("plane_mm_per_pixel must be an empty or 2x2 matrix")
+            (a, b), (d, e) = matrix
+            if a*e == b*d:
+                raise ValueError("Plane displacement calibration must be invertible")
         if c.reference_px and len(c.reference_px) != 2:
             raise ValueError("reference_px must be empty or [x, y]")
         if c.analysis_roi:
@@ -147,8 +162,10 @@ def validate(cfg: AppConfig) -> AppConfig:
         if abs(a[0]*b[1]-a[1]*b[0]) < 1e-12:
             raise ValueError("Angular calibration must be invertible")
     r, p = cfg.recording, cfg.pid
+    if p.plane_separation_mm < 0 or not 1 <= r.fft_interval_s <= 86400 or type(r.compact_output) is not bool:
+        raise ValueError("Invalid plane separation, FFT interval (1..86400 s), or compact_output")
     if p.source_role != PID_SOURCE_ROLE:
-        raise ValueError("PID feedback must use far_field; Dark Field and Near Field are diagnostic only")
+        raise ValueError("PID feedback must use far_field; as the sequencing role for paired near/far feedback")
     if type(p.enabled) is not bool:
         raise ValueError("PID enabled must be true/false")
     if any(type(v) is not int for v in (r.frame_queue_size, r.telemetry_queue_size, r.every_n_frames, r.stream_rollover_MB, p.port)):
@@ -202,6 +219,7 @@ def config_from_dict(raw: dict) -> AppConfig:
                 entry[k] = tuple(entry[k])
         if "urad_per_pixel" in entry:
             entry["urad_per_pixel"] = tuple(tuple(row) for row in entry["urad_per_pixel"])
+        entry["plane_mm_per_pixel"] = tuple(tuple(row) for row in entry.get("plane_mm_per_pixel", ()))
         cameras.append(CameraConfig(**entry))
     pid = dict(raw.get("pid", {}))
     for k in ("kp", "ki", "kd"):

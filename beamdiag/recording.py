@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, fields
 from collections import deque
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from queue import Queue, Empty, Full
@@ -15,6 +15,7 @@ import logging
 import cv2
 import numpy as np
 
+from .alignment import DisplacementSeries, plane_distance, plane_matrix
 from .config import AppConfig, ROLES, PIXEL_BITS
 from .model import DiagnosticFrame, Measurement
 from .timing import percentiles
@@ -27,7 +28,7 @@ from .live_output import CaptureClock, CentroidTable, IMAGE_HEADER, ERROR_HEADER
 log = logging.getLogger(__name__)
 
 
-def create_session(cfg: AppConfig, root: Path, simulated: bool) -> Path:
+def create_session(cfg: AppConfig, root: Path, simulated: bool, *, compact=False) -> Path:
     """Create a date/time-only capture folder and return its raw-data directory."""
     base = Path(cfg.recording.output_dir)
     if not base.is_absolute():
@@ -43,6 +44,12 @@ def create_session(cfg: AppConfig, root: Path, simulated: bool) -> Path:
             break
         except FileExistsError:
             stamp += timedelta(microseconds=1)
+    if compact:
+        (capture/"session.json").write_text(json.dumps({"compact_output": True, "started_local": local.isoformat(),
+            "started_host_ns": started_ns, "simulated": simulated, "plane_separation_mm": plane_distance(cfg, simulated),
+            "plane_mm_per_pixel": {c.role: plane_matrix(c, simulated) for c in cfg.cameras if c.role != "dark_field"}},
+            indent=2), encoding="utf-8")
+        return capture
     session = capture/RAW_FOLDER
     session.mkdir()
     readable = capture/READABLE_FOLDER
@@ -82,11 +89,15 @@ class CaptureLogHandler(logging.Handler):
 
 
 class AsyncRecorder:
+    compact = False
+
     def __init__(self, cfg: AppConfig, session: Path):
         self.cfg, self.session = cfg.recording, session
         self.camera_configs = {c.role: c for c in cfg.cameras}
         self.readable = session.parent/READABLE_FOLDER
         self.clock = CaptureClock(session)
+        self.series = {role: DisplacementSeries() for role in ("near_field", "far_field")}
+        self.fft_interval_s = self.cfg.fft_interval_s
         self._schedule_lock = Lock()
         self._next_snapshot = {}
         self.frames: Queue = Queue(self.cfg.frame_queue_size)
@@ -130,9 +141,10 @@ class AsyncRecorder:
         self.recording.clear()
         log.exception("Recording error; continuous frame recording disabled")
 
-    def submit(self, item: DiagnosticFrame):
+    def submit(self, item: DiagnosticFrame, fps=None):
         if item.measurement is not None and item.frame.role in ("far_field", "near_field"):
-            self.submit_event(item.measurement)
+            rate = fps or self.camera_configs[item.frame.role].fps
+            self.submit_event((item.measurement, rate, self.fft_interval_s))
         # Scheduling is O(1) and never waits for disk or encoding. First frame is a snapshot.
         with self._schedule_lock:
             due = item.frame.received_ns >= self._next_snapshot.get(item.frame.role, 0)
@@ -141,7 +153,7 @@ class AsyncRecorder:
         if due and not self.capture(item, "timed"):
             with self._schedule_lock:
                 self._next_snapshot[item.frame.role] = 0  # Retry next frame if the queue was full.
-        if self.recording.is_set() and item.frame.sequence % self.cfg.every_n_frames == 0:
+        if (not due or not self.compact) and self.recording.is_set() and item.frame.sequence % self.cfg.every_n_frames == 0:
             self.capture(item, "record")
 
     def set_snapshot_interval(self, seconds):
@@ -281,6 +293,31 @@ class AsyncRecorder:
             target.relative_to(self.readable).as_posix(), preview.relative_to(self.readable).as_posix(),
             str(image.dtype), scale, "../raw_data/"+raw_relative.as_posix(), offset, item.background_file])
 
+    @contextmanager
+    def spectrum_output(self, folder):
+        with (folder/"average_fft.csv").open("w", newline="", encoding="utf-8") as stream:
+            writer = csv.writer(stream)
+            writer.writerow(["start_s", "end_s", "camera", "windows", "frequency_hz",
+                             "x_real_px", "y_real_px", "x_imag_px", "y_imag_px", "x_magnitude_px", "y_magnitude_px"])
+            stream.flush()
+
+            def write(role, start, end, count, freq, averages):
+                origin = self.clock.origin/1e9
+                for hz, values in zip(freq, averages):
+                    writer.writerow([round(start-origin, 6), round(end-origin, 6), role, count,
+                                     f"{hz:.8g}", *(f"{v:.8g}" for v in values)])
+                stream.flush()
+
+            def process(sample):
+                m, fps, interval = sample
+                self.series[m.role].add(m, fps, interval, lambda *args: write(m.role, *args))
+                return m
+
+            yield process
+            for role, series in self.series.items():
+                if series.start is not None:
+                    series.finish(series.last_time, lambda *args: write(role, *args))
+
     def _telemetry_loop(self):
         names = [field.name for field in fields(Measurement)]
         try:
@@ -296,12 +333,13 @@ class AsyncRecorder:
                 history.writerow(["Capture time", "Camera", "Outcome", "Requested change", "Applied values", "Message"])
                 history_file.flush()
                 reasons = {}
-                self._write_telemetry(names, table, errors, errors_file, history, history_file, reasons)
+                process = stack.enter_context(self.spectrum_output(self.readable))
+                self._write_telemetry(names, table, errors, errors_file, history, history_file, reasons, process)
                 table.expire(perf_counter_ns(), final=True)
         except Exception as exc:
             self._error(exc)
 
-    def _write_telemetry(self, names, table, errors, errors_file, history, history_file, reasons):
+    def _write_telemetry(self, names, table, errors, errors_file, history, history_file, reasons, process):
         with (self.session/"beam_data.csv").open("w", newline="", encoding="utf-8") as f, \
                 (self.session/"settings_changes.jsonl").open("w", encoding="utf-8") as settings_file, \
                 (self.session/"events.jsonl").open("w", encoding="utf-8") as events_file, \
@@ -338,6 +376,7 @@ class AsyncRecorder:
                             errors.writerow([local, elapsed, elapsed, "Error", m.role+" settings", 1, m.message])
                             errors_file.flush()
                         continue
+                    m = process(m)
                     writer.writerow([getattr(m, name) for name in names]+[m.host_processing_ms])
                     f.flush()
                     table.add(m)
@@ -358,5 +397,6 @@ class AsyncRecorder:
                 thread.join(timeout=10)
         stats = self.stats()
         stats["drain_complete"] = all(not t.is_alive() for t in self._threads) and self.frames.empty() and self.telemetry.empty()
-        (self.session/"recording_summary.json").write_text(json.dumps(stats, indent=2), encoding="utf-8")
+        if not self.compact:
+            (self.session/"recording_summary.json").write_text(json.dumps(stats, indent=2), encoding="utf-8")
         return stats

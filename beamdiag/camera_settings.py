@@ -6,7 +6,8 @@ from .config import CameraConfig, PIXEL_BITS
 
 ACQUISITION_FIELDS = ("exposure_us", "gain", "fps")
 DETECTION_FIELDS = ("background", "threshold", "min_flux", "saturation_level", "max_saturated_fraction")
-LIVE_FIELDS = ACQUISITION_FIELDS+DETECTION_FIELDS
+DF_FIELDS = ("df_mean_limit_dn", "df_hold_s")
+LIVE_FIELDS = ACQUISITION_FIELDS+DETECTION_FIELDS+DF_FIELDS
 
 
 def live_values(cfg: CameraConfig) -> dict:
@@ -23,6 +24,8 @@ def with_live_settings(cfg: CameraConfig, patch: dict) -> CameraConfig:
     updated = replace(cfg, **patch)
     if min(updated.exposure_us, updated.fps) <= 0 or min(updated.gain, updated.background, updated.threshold, updated.min_flux) < 0:
         raise ValueError("Exposure and FPS must be positive; gain and detection settings must be nonnegative")
+    if updated.df_mean_limit_dn < 0 or updated.df_hold_s <= 0:
+        raise ValueError("Invalid Dark Field alarm threshold or duration")
     if not 0 <= updated.max_saturated_fraction <= 1:
         raise ValueError("Maximum clipped fraction must be between 0 and 1")
     if type(updated.saturation_level) is not int or not 0 <= updated.saturation_level <= (1 << PIXEL_BITS[updated.pixel_format])-1:

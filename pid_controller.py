@@ -37,9 +37,14 @@ class ControlLog:
         self.error = ""
         self.thread = Thread(target=self.run, name="control-log", daemon=True)
         self.initial_pid = initial_pid
+        metadata = session/"session.json"
+        self.compact = metadata.exists() and json.loads(metadata.read_text(encoding="utf-8")).get("compact_output", False)
 
     def run(self):
         try:
+            if self.compact:
+                self.write_compact()
+                return
             output = self.session.parent/"human_readable"
             output.mkdir(exist_ok=True)
             clock = CaptureClock(self.session) if (self.session/"session.json").exists() else None
@@ -91,6 +96,28 @@ class ControlLog:
             self.error = str(exc)
             log.exception("Control log failed")
 
+    def write_compact(self):
+        clock = CaptureClock(self.session)
+        with (self.session/"pid.csv").open("w", newline="", encoding="utf-8") as stream:
+            writer = csv.writer(stream)
+            writer.writerow(["time_s", "ff_frame", "state", "approach_x_urad", "approach_y_urad",
+                             "output_x_normalized", "output_y_normalized"])
+            stream.flush()
+            while not self.stop.is_set() or not self.queue.empty():
+                try:
+                    entry = self.queue.get(timeout=.05)
+                except Empty:
+                    continue
+                try:
+                    if isinstance(entry, tuple):
+                        packet, sample = entry
+                        writer.writerow([clock.time(packet.received_ns)[1], packet.sequence, STATES[packet.state],
+                                         finite(sample.x_urad) if sample.valid else "",
+                                         finite(sample.y_urad) if sample.valid else "", packet.x, packet.y])
+                        stream.flush()
+                finally:
+                    self.queue.task_done()
+
     def submit(self, packet: ControlPacket):
         try:
             self.queue.put_nowait(packet)
@@ -100,6 +127,8 @@ class ControlLog:
     def close(self):
         self.stop.set()
         self.thread.join(timeout=5)
+        if self.compact and not (self.error or self.drops or self.thread.is_alive()):
+            return
         (self.session/"control_summary.json").write_text(json.dumps({"log_drops": self.drops,
             "log_error": self.error, "drain_complete": not self.thread.is_alive() and self.queue.empty()}, indent=2), encoding="utf-8")
 

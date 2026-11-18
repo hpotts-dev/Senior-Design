@@ -106,6 +106,6 @@ def assign_cameras(cfg, mapping):
         # Camera replacement cannot inherit the old sensor's optical confirmation/ROI/reference.
         changes = dict(serial=serial)
         if serial != camera.serial:
-            changes.update(calibration_confirmed=False, reference_px=(), analysis_roi=(), background_file="")
+            changes.update(plane_mm_per_pixel=(), calibration_confirmed=False, reference_px=(), analysis_roi=(), background_file="")
         cameras.append(replace(camera, **changes))
     return validate(replace(cfg, cameras=tuple(cameras)))

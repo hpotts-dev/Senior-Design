@@ -18,6 +18,8 @@ import sys
 import shutil
 import numpy as np
 
+from .alignment import ApproachAngle, DarkFieldMonitor
+from .compact import CompactRecorder
 from .cameras import BaslerCamera, SimulatedCamera
 from .centroid import CentroidProcessor
 from .config import AppConfig, CameraConfig, PID_SOURCE_ROLE, validate, bandwidth_report
@@ -65,6 +67,7 @@ class CameraWorker:
         self._camera_latencies = deque(maxlen=4096)
         self._deadline_misses = 0
         self.info = {}
+        self.sample_fps = cfg.fps
         self._pending_lock = Lock()
         self._settings_pending = Event()
         self._pending_settings = None
@@ -91,6 +94,7 @@ class CameraWorker:
 
     def _publish_controls(self, source, status="ready", message="Live camera settings", request_id=0):
         state = source.control_state()
+        self.sample_fps = min(self.cfg.fps, state.get("resulting_fps") or self.cfg.fps, 1e6/self.cfg.exposure_us)
         payload = self.info.get("payload_bytes") or self.cfg.width*self.cfg.height*(1 if self.cfg.pixel_format == "Mono8" else 2)
         throughput = self.info.get("throughput_limit_bps") or self.cfg.throughput_limit_bps
         self.controls.publish({**state, **self._last_update, "values": {**state["values"], **{k: v for k, v in live_values(self.cfg).items() if k not in ACQUISITION_FIELDS}},
@@ -225,7 +229,8 @@ class CameraWorker:
                 source.open()
                 self.info = source.info
                 self._publish_controls(source)
-                (self.engine.session/f"camera_{self.cfg.role}.json").write_text(json.dumps(source.info, indent=2), encoding="utf-8")
+                if not self.engine.cfg.recording.compact_output:
+                    (self.engine.session/f"camera_{self.cfg.role}.json").write_text(json.dumps(source.info, indent=2), encoding="utf-8")
                 with self._lock:
                     self._state, self._error = "running", ""
                 last_arrival = perf_counter()
@@ -250,11 +255,14 @@ class CameraWorker:
                     # Dark Field has no centroid/moment calculation or telemetry rows.
                     measurement = self.processor.process(analysis, native_image=frame.image) if self.cfg.role != "dark_field" else None
                     # Publish feedback before UI handoff and before any recording queue operations.
-                    if self.cfg.role == PID_SOURCE_ROLE:
-                        self.engine.publisher.send(measurement)
+                    if measurement is None:
+                        self.engine.dark_field.update(frame.received_ns, float(frame.image.mean()), self.cfg)
+                    else:
+                        self.engine.approach.publish(measurement, self.engine.cfg.pid.max_sample_age_ms,
+                                                     self.engine.publisher.send)
                     item = DiagnosticFrame(frame, measurement, corrected, self._background_archive)
                     self.latest.publish(item)
-                    self.engine.recorder.submit(item)
+                    self.engine.recorder.submit(item, self.sample_fps)
                     retry_delay = 0.2
                     with self._lock:
                         self._frames += 1
@@ -277,7 +285,7 @@ class CameraWorker:
             finally:
                 try:
                     source.close()
-                    if source.info:
+                    if source.info and not self.engine.cfg.recording.compact_output:
                         (self.engine.session/f"camera_{self.cfg.role}.json").write_text(
                             json.dumps(source.info, indent=2), encoding="utf-8")
                 except Exception:
@@ -291,15 +299,21 @@ class DiagnosticEngine:
                  launch_pid: bool = True, generate_reports: bool = True):
         self.cfg, self.config_path, self.root = cfg, config_path, root
         self.simulated, self.launch_pid = simulated, launch_pid
-        self.session = create_session(cfg, root, simulated)
+        self.session = create_session(cfg, root, simulated, compact=cfg.recording.compact_output)
         self.capture_dir, _, self.readable_dir = capture_paths(self.session)
+        if cfg.recording.compact_output:
+            self.capture_dir = self.readable_dir = self.session
+        self.approach = ApproachAngle(cfg, simulated)
+        self.dark_field = DarkFieldMonitor()
         self.generate_reports = generate_reports and cfg.recording.generate_readable
         self._started = False
         self._reporter = None
         self.stop = Event()
         self.token = secrets.randbits(63)
         self.publisher = ErrorPublisher(cfg.pid.host, cfg.pid.port, self.token, cfg.pid)
-        self.recorder = AsyncRecorder(cfg, self.session)
+        recorder_type = CompactRecorder if cfg.recording.compact_output else AsyncRecorder
+        self.recorder = recorder_type(cfg, self.session)
+        self.series = self.recorder.series
         self._capture_log = CaptureLogHandler(self.recorder)
         logging.getLogger().addHandler(self._capture_log)
         self._background_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="background-save")
@@ -320,6 +334,8 @@ class DiagnosticEngine:
         self._desired_configs = {c.role: c for c in cfg.cameras}
 
     def archive_background(self, configured_path):
+        if self.cfg.recording.compact_output:
+            return str(configured_path)
         source = Path(configured_path)
         if not source.is_absolute():
             source = self.config_path.parent/source
@@ -362,6 +378,14 @@ class DiagnosticEngine:
             {"background_file": cfg.background_file}, {"background_file": cfg.background_file},
             "Averaged dark reference saved; native raw frames remain unmodified", 0, "background"))
         return average, cfg, archive
+
+    def set_fft_interval(self, seconds):
+        with self._config_save_lock:
+            cfg = validate(replace(self.current_config(), recording=replace(self.cfg.recording, fft_interval_s=seconds)))
+            save_config(cfg, self.config_path)
+            self.cfg = replace(self.cfg, recording=cfg.recording)
+            self.recorder.fft_interval_s = seconds
+            self.recorder.cfg = replace(self.recorder.cfg, fft_interval_s=seconds)
 
     def set_snapshot_interval(self, seconds):
         self.recorder.set_snapshot_interval(seconds)
@@ -445,18 +469,7 @@ class DiagnosticEngine:
                 "reason": "Nominal PID is paused" if state == "paused" else reason}
 
     def feedback_reason(self):
-        worker = self.workers[PID_SOURCE_ROLE]
-        item = worker.latest.read()
-        if item is None:
-            return "Waiting for a Far Field frame"
-        reasons = {"uncalibrated": "Far Field calibration is not confirmed",
-                   "saturation": "Far Field clipping exceeds the allowed percentage; reduce exposure or gain",
-                   "low_flux": "Far Field signal is below the detection threshold"}
-        if item.measurement.reason in reasons:
-            return reasons[item.measurement.reason]
-        if (perf_counter_ns()-item.frame.received_ns)/1e6 > self.cfg.pid.watchdog_ms:
-            return "Waiting for fresh Far Field feedback; the watchdog interval has elapsed"
-        return "Far Field angular feedback is valid" if item.measurement.reason == "ok" else item.measurement.reason
+        return self.approach.reason
 
     def queue_feedback_settings(self, patch: dict) -> int:
         worker = self.workers[PID_SOURCE_ROLE]
@@ -515,7 +528,7 @@ class DiagnosticEngine:
                 raise ValueError("Requested rates exceed the shared Ethernet payload budget")
             controls = worker.controls.read()
             maximum = controls.get("delivery_budget_max_fps")
-            if maximum and camera.fps > maximum:
+            if maximum and camera.fps > maximum and camera.fps > worker.cfg.fps:
                 raise ValueError(f"This camera's paced link supports at most {maximum:.2f} fps at the current ROI (with transport headroom)")
             request_id = worker.queue_settings(patch)
             self._desired_configs[role] = camera
@@ -591,17 +604,23 @@ class DiagnosticEngine:
             replace(worker.cfg, reference_px=worker.processor.reference_state(worker.cfg.width, worker.cfg.height)[:2])
             for worker in self.workers.values())).to_dict()
         summary["capture_directory"] = str(self.capture_dir)
-        summary["readable_report"] = {"state": "live files complete",
-                                      "path": str(self.readable_dir/"START_HERE.html")}
-        (self.session/"readable_report_status.json").write_text(json.dumps({"state": "ready",
-            "mode": "written live", "saved_frames": recording["frames_saved"],
-            "png_frames": recording["png_frames_saved"], "path": str(self.readable_dir/"START_HERE.html")}, indent=2), encoding="utf-8")
-        (self.session/"summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+        if not self.cfg.recording.compact_output:
+            summary["readable_report"] = {"state": "live files complete",
+                                          "path": str(self.readable_dir/"START_HERE.html")}
+            (self.session/"readable_report_status.json").write_text(json.dumps({"state": "ready",
+                "mode": "written live", "saved_frames": recording["frames_saved"],
+                "png_frames": recording["png_frames_saved"], "path": str(self.readable_dir/"START_HERE.html")}, indent=2), encoding="utf-8")
+            (self.session/"summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+        else:
+            (self.session/"pid_ready.json").unlink(missing_ok=True)
         self.publisher.close()
         logging.getLogger().removeHandler(self._capture_log)
         self._capture_log.close()
         if self._pid_log:
             self._pid_log.close()
+            log_path = self.session/"pid_process.log"
+            if self.cfg.recording.compact_output and log_path.stat().st_size == 0:
+                log_path.unlink()
         return summary
 
     def wait_for_readable_report(self, timeout=None):

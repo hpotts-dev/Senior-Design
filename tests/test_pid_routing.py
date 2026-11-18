@@ -1,4 +1,4 @@
-"""Verify Far Field is the exclusive PID input, including invalid/missing FF feedback."""
+"""Verify paired pointing is the sole PID input and requires both camera workers."""
 from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -9,6 +9,7 @@ from unittest.mock import Mock, patch
 import unittest
 import numpy as np
 
+from beamdiag.alignment import ApproachAngle, DarkFieldMonitor
 from beamdiag.centroid import CentroidProcessor
 from beamdiag.config import AppConfig, CameraConfig, PIDConfig, PID_SOURCE_ROLE, ROLES, validate
 from beamdiag.model import Frame
@@ -32,13 +33,16 @@ class FarFieldPIDRoutingTests(unittest.TestCase):
 
     def run_workers(self, far_field_mode="valid"):
         publisher, recorder = Mock(), Mock()
+        app = AppConfig()
+        approach = ApproachAngle(app, simulated=True)
+        dark = DarkFieldMonitor()
         with TemporaryDirectory(dir=ROOT/"validation") as tmp:
             self.assertTrue(Path(tmp).resolve().is_relative_to(ROOT.resolve()))
             for role in ROLES:
                 cfg, frame, _ = self.measurement(role, blank=role == PID_SOURCE_ROLE and far_field_mode == "invalid")
                 stop = Event()
                 engine = SimpleNamespace(stop=stop, session=Path(tmp), simulated=False, publisher=publisher,
-                                         recorder=recorder, cfg=AppConfig())
+                                         recorder=recorder, cfg=app, approach=approach, dark_field=dark)
                 source = Mock(info={"backend": "test"})
                 source.control_state.return_value = {"values": live_values(cfg), "capabilities": {}, "resulting_fps": cfg.fps}
 
@@ -51,12 +55,13 @@ class FarFieldPIDRoutingTests(unittest.TestCase):
                     CameraWorker(cfg, engine).run()
         return publisher, recorder
 
-    def test_only_far_field_is_forwarded_when_all_cameras_are_valid(self):
+    def test_paired_frames_cancel_common_displacement(self):
         publisher, recorder = self.run_workers()
         self.assertEqual(recorder.submit.call_count, 3)
         publisher.send.assert_called_once()
         self.assertEqual(publisher.send.call_args.args[0].role, PID_SOURCE_ROLE)
         self.assertTrue(publisher.send.call_args.args[0].angular_valid)
+        self.assertEqual(publisher.send.call_args.args[0].error_x_urad, 0)
 
     def test_invalid_far_field_is_forwarded_as_invalid_without_other_camera_fallback(self):
         publisher, recorder = self.run_workers("invalid")

@@ -26,7 +26,7 @@ class FeedbackProcessTests(unittest.TestCase):
             config = folder/"config.toml"
             config.write_text((ROOT/"config.example.toml").read_text().replace("port = 49152", f"port = {port}"))
             cfg = load_config(config)
-            cfg = replace(cfg, recording=replace(cfg.recording, output_dir=str(folder/"runs")))
+            cfg = replace(cfg, recording=replace(cfg.recording, compact_output=False, output_dir=str(folder/"runs")))
             engine = DiagnosticEngine(cfg, config, ROOT, simulated=True)
             # Use deterministic Far Field error packets to verify actual gain
             # changes; workers are not started and no camera is accessed.

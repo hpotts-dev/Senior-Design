@@ -52,7 +52,7 @@ class LiveCaptureTests(unittest.TestCase):
         self.tmp = TemporaryDirectory(dir=ROOT/"validation")
         self.folder = Path(self.tmp.name)
         self.cfg = AppConfig(cameras=tuple(CameraConfig(r, width=32, height=32, background_frames=3) for r in ROLES),
-            recording=RecordingConfig(output_dir=str(self.folder/"captures")))
+            recording=RecordingConfig(output_dir=str(self.folder/"captures"), compact_output=False, snapshot_interval_s=60.0))
         self.cfg = replace(self.cfg, pid=replace(self.cfg.pid, port=free_port()))
         self.config = self.folder/"config.toml"
         save_config(self.cfg, self.config)
@@ -72,7 +72,7 @@ class LiveCaptureTests(unittest.TestCase):
 
     def test_defaults_and_full_configuration_round_trip(self):
         self.assertTrue(all(c.pixel_format == "Mono12" and c.fps == 10 for c in AppConfig().cameras))
-        self.assertEqual(AppConfig().recording.snapshot_interval_s, 60)
+        self.assertEqual(AppConfig().recording.snapshot_interval_s, 5)
         self.assertEqual(parse_config(config_text(self.cfg)), self.cfg)
         with self.assertRaises(ValueError):
             parse_config(config_text(self.cfg).replace("snapshot_interval_s = 60.0", "snapshot_interval_s = 0"))
