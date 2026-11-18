@@ -443,7 +443,7 @@ class DiagnosticWindow(QtWidgets.QMainWindow):
             image, white = preview_u8(image, worker.cfg.pixel_format, panel.auto_contrast.isChecked())
             panel.display_range.setText(f"0–{white:.0f} DN")
             # Display overlay lives in a small display-only copy; raw recorded pixels are untouched.
-            display = cv2.cvtColor(image if role == "dark_field" else 255-image, cv2.COLOR_GRAY2RGB)
+            display = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
             height, width = frame.image.shape
             rx, ry, revision = worker.processor.reference_state(width, height)
             panel.sync_reference(rx, ry, revision, width, height)
